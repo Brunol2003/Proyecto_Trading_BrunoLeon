@@ -15,3 +15,4 @@ def preprocess_data(raw_data: pd.DataFrame) -> pd.DataFrame:
         data["Low"] = raw_data.Low
         data["Close"] = raw_data.Close
         return data
+
