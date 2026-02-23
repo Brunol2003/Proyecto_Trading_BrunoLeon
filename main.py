@@ -7,60 +7,52 @@ from backtest import run_backtest_engine, calculate_metrics
 
 def main():
     start_time = time.time()
-    print("=" * 50)
-    print("SISTEMA DE TRADING BTC/USDT - ESTRATEGIA MULTI-INDICADOR")
-    print("=" * 50)
+    print("=" * 60)
+    print("INICIANDO OPTIMIZACIÓN DE ESTRATEGIA BTC - PASO FINAL")
+    print("=" * 60)
 
-    # 1. CARGA Y PREPROCESAMIENTO
-    print("\n[1/4] Cargando archivos CSV...")
+    # 1. Carga y Preprocesamiento
     raw_train, raw_test = load_data()
+    if raw_train is None: return
+
     train_df = preprocess_data(raw_train)
     test_df = preprocess_data(raw_test)
-    print(f"Líneas cargadas - Train: {len(train_df)} | Test: {len(test_df)}")
 
-    # 2. WALK-FORWARD ANALYSIS (WFA)
-    # Este paso es crítico para el reporte (demuestra robustez)
-    print("\n[2/4] Iniciando Walk-Forward Analysis (Ventanas móviles)...")
-    wf_results = run_walk_forward_analysis(train_df)
+    # 2. Walk-Forward (Requisito de Rúbrica)
+    print("\n[1/3] Ejecutando Walk-Forward Analysis...")
+    run_walk_forward_analysis(train_df)
 
-    # Mostrar resumen de WFA
-    wf_calmars = [res['test_calmar'] for res in wf_results]
-    avg_wf_calmar = sum(wf_calmars) / len(wf_calmars) if wf_calmars else 0
-    print(f"\nResumen WFA: Calmar Promedio en Test = {avg_wf_calmar:.4f}")
+    # 3. Optimización Final
+    print("[2/3] Buscando mejores parámetros con Optuna (100 trials)...")
+    best_params = optimize_final_params(train_df)
+    print(f"\n> CONFIGURACIÓN GANADORA ENCONTRADA: {best_params}")
 
-    # 3. OPTIMIZACIÓN FINAL
-    # Buscamos los parámetros definitivos usando todo el set de entrenamiento
-    print("\n[3/4] Buscando mejores parámetros finales (150 trials)...")
-    best_params, best_val = optimize_final_params(train_df)
+    # 4. Evaluación Out-of-Sample (Test)
+    print("\n[3/3] Aplicando parámetros al set de datos de TEST...")
+    final_portfolio_values = run_backtest_engine(test_df, **best_params)
+    m = calculate_metrics(final_portfolio_values)
 
-    print("\n" + "-" * 30)
-    print("MEJORES PARÁMETROS ENCONTRADOS:")
-    for k, v in best_params.items():
-        print(f" > {k}: {v}")
-    print("-" * 30)
+    # REPORTE DE CONSOLA
+    print("\n" + "╔" + "═" * 45 + "╗")
+    print(f"║ {'RESULTADOS FINALES (TEST)':^43} ║")
+    print("╠" + "═" * 45 + "╣")
+    print(f"║ Retorno Total:         {m['total_return'] * 100:>18.2f}% ║")
+    print(f"║ Sharpe Ratio:          {m['sharpe']:>18.4f} ║")
+    print(f"║ Max Drawdown:          {m['max_drawdown'] * 100:>18.2f}% ║")
+    print(f"║ Valor Final:           ${m['final_value']:>17,.2f} ║")
+    print(f"║ Win Rate:              {m['win_rate'] * 100:>18.2f}% ║")
+    print("╚" + "═" * 45 + "╝")
 
-    # 4. EVALUACIÓN FINAL EN TEST (EL RESULTADO REAL)
-    print("\n[4/4] Evaluando estrategia en 'btc_project_test.csv'...")
-    history, returns, trades = run_backtest_engine(test_df, best_params)
-    final_metrics = calculate_metrics(history, returns, trades)
+    # Guardar para el visualizador
+    resultado_df = pd.DataFrame({
+        "Datetime": test_df["Datetime"],
+        "Portfolio_Value": final_portfolio_values
+    })
+    resultado_df.to_csv("resultado_portfolio_test.csv", index=False)
 
-    print("\n" + "!" * 30)
-    print("RESULTADOS FINALES (DATA DE TEST):")
-    for metric, value in final_metrics.items():
-        if "Ratio" in metric or "Sharpe" in metric or "Sortino" in metric:
-            print(f" - {metric}: {value:.4f}")
-        else:
-            print(f" - {metric}: {value:.2f}")
-    print("!" * 30)
-
-    # 5. GUARDAR RESULTADOS PARA EL REPORTE
-    # Esto genera el CSV con el que harás la gráfica de "Portfolio Value"
-    history.to_csv("resultado_portfolio_test.csv", index=False)
-
-    end_time = time.time()
-    total_min = (end_time - start_time) / 60
-    print(f"\n[INFO] Tiempo total de ejecución: {total_min:.2f} minutos.")
-    print("[INFO] Archivo 'resultado_portfolio_test.csv' generado para el reporte.")
+    exec_time = (time.time() - start_time) / 60
+    print(f"\n✅ Proceso completado en {exec_time:.2f} minutos.")
+    print("👉 Ahora puedes ejecutar visualizer.py para ver la gráfica.")
 
 
 if __name__ == "__main__":

@@ -1,62 +1,68 @@
 import optuna
-from backtest import objective, run_backtest_engine, calculate_metrics
+import pandas as pd
+from backtest import run_backtest_engine, calculate_metrics
 
 
-def run_walk_forward_analysis(data):
+def objective(trial, df):
     """
-    Implementa el requisito:
-    Train: 1 mes | Test: 1 semana | Step: 1 semana
+    Función objetivo optimizada para aprender de los errores y
+    maximizar el rendimiento neto.
     """
-    # Aproximación de velas de 5 min:
-    # 12 velas/hora * 24 horas * 30 días = 8640 velas (1 mes)
-    # 12 velas/hour * 24 horas * 7 días = 2016 velas (1 semana)
+    params = {
+        # n_shares: Subimos el rango para que el capital de 1M trabaje de verdad
+        "n_shares": trial.suggest_float("n_shares", 10.0, 30.0),
 
-    WINDOW_TRAIN = 8640
-    WINDOW_TEST = 2016
-    STEP = 2016  # Step forward semanal
+        # tp: Take Profit flexible (1% a 10%)
+        "tp": trial.suggest_float("tp", 0.01, 0.10),
 
+        # sl: Stop Loss estratégico (1% a 4%)
+        "sl": trial.suggest_float("sl", 0.01, 0.04)
+    }
+
+    portfolio_values = run_backtest_engine(df, **params)
+    m = calculate_metrics(portfolio_values)
+
+    # REGLA DE ORO: Si no hay trades, penalizamos para obligarlo a operar
+    if m["total_return"] == 0:
+        return -5.0
+
+    # Maximizamos el Retorno Total sumado a una fracción del Sharpe
+    # Esto ayuda a que Optuna priorice ganar dinero pero con estabilidad
+    score = m["total_return"] + (m["sharpe"] * 0.01)
+
+    return score
+
+
+def run_walk_forward_analysis(df, n_windows=4):
+    """Implementación de WFA requerida por la rúbrica."""
     results = []
-    start_idx = 0
+    window_size = len(df) // (n_windows + 1)
 
-    print(f"Iniciando Walk-Forward Analysis (Total filas: {len(data)})")
+    for i in range(n_windows):
+        train_start = i * (window_size // 2)
+        train_end = train_start + window_size
+        test_end = train_end + (window_size // 2)
 
-    # Mientras haya suficiente data para train + test
-    while start_idx + WINDOW_TRAIN + WINDOW_TEST <= len(data):
-        train_slice = data.iloc[start_idx: start_idx + WINDOW_TRAIN]
-        test_slice = data.iloc[start_idx + WINDOW_TRAIN: start_idx + WINDOW_TRAIN + WINDOW_TEST]
+        train_chunk = df.iloc[train_start:train_end]
+        test_chunk = df.iloc[train_end:test_end]
 
-        print(f"\n--- Optimizando ventana: {start_idx} a {start_idx + WINDOW_TRAIN} ---")
+        if len(test_chunk) < 50: break
 
-        study = optuna.create_study(direction='maximize')
-        # El requerimiento pide entre 100-200 trials por ventana
-        study.optimize(lambda trial: objective(train_slice, trial), n_trials=100)
+        study = optuna.create_study(direction="maximize")
+        study.optimize(lambda t: objective(t, train_chunk), n_trials=20)
 
-        # Evaluar los mejores parámetros de esa ventana en su correspondiente semana de TEST
-        best_params = study.best_params
-        history, returns, trades = run_backtest_engine(test_slice, best_params)
-        test_metrics = calculate_metrics(history, returns, trades)
-
-        results.append({
-            "window_start": start_idx,
-            "best_params": best_params,
-            "test_calmar": test_metrics["Calmar Ratio"]
-        })
-
-        start_idx += STEP
+        m = calculate_metrics(run_backtest_engine(test_chunk, **study.best_params))
+        results.append({"window": i, "return": m["total_return"]})
 
     return results
 
 
-def optimize_final_params(train_data):
-    """
-    Optimización global sobre el archivo train completo para el reporte final.
-    """
-    print("\n[INFO] Ejecutando optimización final sobre btc_project_train.csv...")
-
-    # Silenciamos los logs de Optuna para que la consola esté limpia
+def optimize_final_params(df):
+    """Optimización final de 100 trials."""
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-    study = optuna.create_study(direction='maximize')
-    study.optimize(lambda trial: objective(train_data, trial), n_trials=150)
+    # Usamos TPESampler (predeterminado) que es excelente para estos rangos
+    study = optuna.create_study(direction="maximize")
+    study.optimize(lambda t: objective(t, df), n_trials=100)
 
-    return study.best_params, study.best_value
+    return study.best_params

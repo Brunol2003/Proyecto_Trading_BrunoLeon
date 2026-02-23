@@ -1,141 +1,86 @@
 import pandas as pd
 import numpy as np
-import ta
 
 
-def run_backtest_engine(data, params):
-    """
-    Ejecuta la simulación de trading y retorna el historial del portafolio.
-    """
-    cash = 1_000_000
-    initial_cash = cash
-    COM = 0.125 / 100
-    active_longs = []
-    active_shorts = []
-    portfolio_history = [cash]
-    returns = []
-    trades = []  # 1 para acierto, 0 para pérdida
+def run_backtest_engine(df, n_shares, tp, sl, comision=0.00125):
+    """Motor de backtest con soporte Long/Short y comisiones."""
+    cash = 1_000_000.0
+    position = 0  # 1: Long, -1: Short
+    entry_price = 0
+    portfolio_values = []
 
-    # Configuración de indicadores
-    df = data.copy()
-    df["rsi"] = ta.momentum.RSIIndicator(df.Close, window=params['rsi_window']).rsi()
-    macd_ind = ta.trend.MACD(df.Close, window_slow=26, window_fast=12, window_sign=9)
-    df["macd_diff"] = macd_ind.macd_diff()
-    bb_ind = ta.volatility.BollingerBands(df.Close, window=params['bb_window'], window_dev=params['bb_dev'])
-    df["bb_low"] = bb_ind.bollinger_lband()
-    df["bb_high"] = bb_ind.bollinger_hband()
-    df = df.dropna()
+    for i in range(len(df)):
+        current_price = df.iloc[i]['Close']
 
-    for _, row in df.iterrows():
-        price = row.Close
+        # Señales (Confirmación 2 de 3)
+        rsi = df.iloc[i]['RSI']
+        macd = df.iloc[i]['MACD']
+        macd_s = df.iloc[i]['MACD_signal']
+        bbl, bbu = df.iloc[i]['BBL'], df.iloc[i]['BBU']
 
-        # --- GESTIÓN DE POSICIONES ABIERTAS ---
-        # Longs: Cierre por TP/SL
-        for pos in active_longs.copy():
-            current_val = price * pos['shares']
-            if current_val <= pos['sl'] or current_val >= pos['tp']:
-                cash += current_val * (1 - COM)
-                trades.append(1 if current_val > pos['entry_val'] else 0)
-                active_longs.remove(pos)
+        # Condiciones relajadas para dar margen a la optimización
+        buy_signal = (int(rsi < 45) + int(macd > macd_s) + int(current_price < bbl * 1.01)) >= 2
+        sell_signal = (int(rsi > 55) + int(macd < macd_s) + int(current_price > bbu * 0.99)) >= 2
 
-        # Shorts: Cierre por TP/SL (Sin apalancamiento)
-        for pos in active_shorts.copy():
-            current_liab = price * pos['shares']
-            # En Short: SL si sube, TP si baja
-            if current_liab >= pos['sl'] or current_liab <= pos['tp']:
-                pnl = (pos['entry_price'] - price) * pos['shares']
-                cash += pos['collateral'] + pnl - (current_liab * COM)
-                trades.append(1 if pnl > 0 else 0)
-                active_shorts.remove(pos)
+        # 1. GESTIÓN DE SALIDAS
+        if position != 0:
+            if position == 1:
+                pnl_pct = (current_price - entry_price) / entry_price
+            else:
+                pnl_pct = (entry_price - current_price) / entry_price
 
-        # --- GENERACIÓN DE SEÑALES (2 DE 3) ---
-        # Alcista: RSI bajo, MACD subiendo, BB tocando fondo
-        long_cond = (int(row.rsi < params['rsi_lower']) +
-                     int(row.macd_diff > 0) +
-                     int(price < row.bb_low)) >= 2
+            if pnl_pct >= tp or pnl_pct <= -sl:
+                order_value = n_shares * current_price
+                fee = order_value * comision
+                if position == 1:
+                    cash += order_value - fee
+                else:
+                    profit = (entry_price - current_price) * n_shares
+                    cash += (n_shares * entry_price) + profit - fee
+                position, entry_price = 0, 0
 
-        # Bajista: RSI alto, MACD bajando, BB tocando techo
-        short_cond = (int(row.rsi > params['rsi_upper']) +
-                      int(row.macd_diff < 0) +
-                      int(price > row.bb_high)) >= 2
+        # 2. GESTIÓN DE ENTRADAS
+        if position == 0:
+            if buy_signal:
+                cost = n_shares * current_price
+                fee = cost * comision
+                if cash >= (cost + fee):
+                    cash -= (cost + fee)
+                    position, entry_price = 1, current_price
+            elif sell_signal:
+                cost = n_shares * current_price
+                fee = cost * comision
+                if cash >= (cost + fee):
+                    cash -= (cost + fee)
+                    position, entry_price = -1, current_price
 
-        # --- EJECUCIÓN ---
-        n_shares = params['n_shares']
-        position_value = price * n_shares
+        # 3. VALORIZACIÓN
+        if position == 1:
+            val = cash + (n_shares * current_price)
+        elif position == -1:
+            profit = (entry_price - current_price) * n_shares
+            val = cash + (n_shares * entry_price) + profit
+        else:
+            val = cash
+        portfolio_values.append(val)
 
-        if long_cond and cash >= position_value * (1 + COM):
-            cash -= position_value * (1 + COM)
-            active_longs.append({
-                'entry_price': price, 'entry_val': position_value, 'shares': n_shares,
-                'sl': position_value * (1 - params['stop_loss']),
-                'tp': position_value * (1 + params['take_profit'])
-            })
-
-        elif short_cond and cash >= position_value * (1 + COM):
-            # Bloqueamos el colateral 1:1 (No leverage)
-            cash -= position_value * (1 + COM)
-            active_shorts.append({
-                'entry_price': price, 'shares': n_shares, 'collateral': position_value,
-                'sl': position_value * (1 + params['stop_loss']),
-                'tp': position_value * (1 - params['take_profit'])
-            })
-
-        # --- VALORIZACIÓN DEL PORTAFOLIO ---
-        val_long = sum([price * p['shares'] for p in active_longs])
-        val_short = sum([p['collateral'] + (p['entry_price'] - price) * p['shares'] for p in active_shorts])
-        current_total = cash + val_long + val_short
-
-        returns.append((current_total / portfolio_history[-1]) - 1)
-        portfolio_history.append(current_total)
-
-    return pd.Series(portfolio_history), pd.Series(returns), trades
+    return portfolio_values
 
 
-def calculate_metrics(history, returns, trades):
-    """ Retorna el diccionario de métricas exigido por el reporte """
-    if len(returns) < 5: return {"Calmar": 0, "Sharpe": 0, "Sortino": 0}
+def calculate_metrics(portfolio_values):
+    p_series = pd.Series(portfolio_values)
+    returns = p_series.pct_change().dropna()
+    total_return = (p_series.iloc[-1] - p_series.iloc[0]) / p_series.iloc[0]
+    max_dd = abs(((p_series - p_series.cummax()) / p_series.cummax()).min())
 
-    total_ret = (history.iloc[-1] / history.iloc[0]) - 1
-    # Anualización para 5 minutos
-    ann_factor = 105120
-    ann_ret = (1 + total_ret) ** (ann_factor / len(returns)) - 1
-
-    # Drawdown
-    cum_max = history.cummax()
-    drawdown = (cum_max - history) / cum_max
-    mdd = drawdown.max()
-
-    # Ratios
-    sharpe = (returns.mean() / returns.std()) * np.sqrt(ann_factor) if returns.std() != 0 else 0
-    neg_ret = returns[returns < 0]
-    sortino = (returns.mean() / neg_ret.std()) * np.sqrt(ann_factor) if len(neg_ret) > 0 else 0
-    calmar = ann_ret / mdd if mdd > 0 else 0
-
-    win_rate = (sum(trades) / len(trades)) * 100 if len(trades) > 0 else 0
+    # Anualización para velas de 5 min
+    ann_factor = np.sqrt(288 * 365)
+    sharpe = (returns.mean() / returns.std() * ann_factor) if returns.std() != 0 else -1
 
     return {
-        "Annualized Return": ann_ret,
-        "Max Drawdown": mdd,
-        "Sharpe Ratio": sharpe,
-        "Sortino Ratio": sortino,
-        "Calmar Ratio": calmar,
-        "Win Rate (%)": win_rate,
-        "Total Trades": len(trades)
+        "final_value": p_series.iloc[-1],
+        "total_return": total_return,
+        "max_drawdown": max_dd,
+        "sharpe": sharpe,
+        "win_rate": (returns > 0).sum() / len(returns) if len(returns) > 0 else 0
     }
-
-
-def objective(data, trial):
-    """ Interfaz para Optuna """
-    params = {
-        'n_shares': trial.suggest_float("n_shares", 0.1, 5.0),
-        'take_profit': trial.suggest_float("take_profit", 0.01, 0.15),
-        'stop_loss': trial.suggest_float("stop_loss", 0.01, 0.15),
-        'rsi_window': trial.suggest_int("rsi_window", 7, 30),
-        'rsi_lower': trial.suggest_int("rsi_lower", 20, 40),
-        'rsi_upper': trial.suggest_int("rsi_upper", 60, 80),
-        'bb_window': trial.suggest_int("bb_window", 14, 50),
-        'bb_dev': trial.suggest_float("bb_dev", 1.5, 2.5)
-    }
-    hist, ret, trd = run_backtest_engine(data, params)
-    met = calculate_metrics(hist, ret, trd)
-    return met["Calmar Ratio"]
