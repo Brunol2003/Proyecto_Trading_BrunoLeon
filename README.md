@@ -1,1 +1,1 @@
-# primer_repro
+# Proyecto_Trading_Bruno
